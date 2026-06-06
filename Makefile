@@ -24,8 +24,9 @@ SRC = $(TARGET).c patterns.c i2c/i2c_machine.c ws2812/light_ws2812_AVR/Light_WS2
 
 # Programming hardware: type avrdude -c ?
 # to get a full listing.
-AVRDUDE_PROGRAMMER = usbasp              # official name of 
-#AVRDUDE_PROGRAMMER = avrispmkII              # official name of 
+AVRDUDE_PROGRAMMER = atmelice_isp
+#AVRDUDE_PROGRAMMER = usbasp
+#AVRDUDE_PROGRAMMER = avrispmkII
 
 AVRDUDE_PORT = usb
 #AVRDUDE_PORT = lpt1		       # windows
