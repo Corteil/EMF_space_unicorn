@@ -1,0 +1,14 @@
+# Build artifacts
+*.o
+*.d
+*.elf
+*.hex
+*.eep
+*.lss
+*.lst
+*.map
+*.sym
+*.cof
+
+# Claude Code session data
+.claude/
