@@ -1,109 +1,175 @@
 """
 Space Unicorn — ATtiny85 I2C Register Test Tool
-MicroPython CLI for verifying the NeoPixel pattern firmware.
 
-Target : ATtiny85 I2C slave at address 0x40
-Tested on Pi Pico / Pico W running MicroPython.
+Runs on MicroPython (Pi Pico / Pico W) and CPython on Linux (Raspberry Pi).
+Platform is detected automatically at import time.
 
-Wiring (adjust PIN_SCL / PIN_SDA at top of file):
-  ATtiny85 pin 5 (PB0/SDA) --> Pico GP4
-  ATtiny85 pin 7 (PB2/SCL) --> Pico GP5
-  2.2 kOhm pull-ups to 3.3 V on both lines
-  Shared GND
+MicroPython wiring (adjust MP_PIN_SDA / MP_PIN_SCL):
+  ATtiny85 PB0 (pin 5, SDA) --> Pico GP4
+  ATtiny85 PB2 (pin 7, SCL) --> Pico GP5
+  2.2 kOhm pull-ups to 3.3 V on both lines, shared GND.
+
+Raspberry Pi wiring (I2C1, /dev/i2c-1):
+  ATtiny85 PB0 (pin 5, SDA) --> RPi GPIO 2 (pin 3)
+  ATtiny85 PB2 (pin 7, SCL) --> RPi GPIO 3 (pin 5)
+  2.2 kOhm pull-ups to 3.3 V on both lines, shared GND.
+  Enable I2C: sudo raspi-config > Interface Options > I2C
+  Install:    sudo apt install python3-smbus2
 """
 
-from machine import I2C, Pin
 import time
 
-# ── Configuration — adjust to match your wiring ───────────────────────────────
-I2C_BUS  = 0        # Pi Pico I2C bus ID (0 or 1)
-PIN_SDA  = 4        # GP4  (I2C0 default)
-PIN_SCL  = 5        # GP5  (I2C0 default)
-I2C_FREQ = 100_000  # 100 kHz standard mode
+# ── Platform detection ────────────────────────────────────────────────────────
+
+try:
+    from machine import I2C as _MachineI2C, Pin as _Pin
+    _PLATFORM = 'micropython'
+except ImportError:
+    _PLATFORM = 'linux'
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+# MicroPython (Pi Pico) — adjust pins to match your wiring
+MP_I2C_BUS = 0
+MP_PIN_SDA  = 4       # GP4
+MP_PIN_SCL  = 5       # GP5
+MP_I2C_FREQ = 100_000 # 100 kHz
+
+# Linux (Raspberry Pi) — /dev/i2c-<LINUX_I2C_BUS>
+LINUX_I2C_BUS = 1     # i2c-1 = GPIO 2/3 on all Pi models
+
+# Shared
+ADDR = 0x40
+
+# ── sleep_ms abstraction ──────────────────────────────────────────────────────
+
+if _PLATFORM == 'micropython':
+    def sleep_ms(ms):
+        time.sleep_ms(ms)
+else:
+    def sleep_ms(ms):
+        time.sleep(ms / 1000.0)
+
+# ── I2C adapters ──────────────────────────────────────────────────────────────
+
+class _MicroPythonAdapter:
+    def __init__(self):
+        self._bus = _MachineI2C(
+            MP_I2C_BUS,
+            scl=_Pin(MP_PIN_SCL),
+            sda=_Pin(MP_PIN_SDA),
+            freq=MP_I2C_FREQ,
+        )
+        self.description = "I2C{} SCL=GP{} SDA=GP{} {}kHz (MicroPython)".format(
+            MP_I2C_BUS, MP_PIN_SCL, MP_PIN_SDA, MP_I2C_FREQ // 1000)
+
+    def scan(self):
+        return self._bus.scan()
+
+    def write_reg(self, reg, val):
+        self._bus.writeto_mem(ADDR, reg, bytes([val & 0xFF]))
+
+    def read_reg(self, reg):
+        return self._bus.readfrom_mem(ADDR, reg, 1)[0]
+
+    def write_block(self, reg, data):
+        self._bus.writeto_mem(ADDR, reg, bytes(data))
+
+    def read_block(self, reg, n):
+        return list(self._bus.readfrom_mem(ADDR, reg, n))
+
+
+class _LinuxAdapter:
+    def __init__(self):
+        try:
+            import smbus2 as _smbus2
+        except ImportError:
+            raise ImportError(
+                "smbus2 not found. Install with: sudo apt install python3-smbus2")
+        self._bus = _smbus2.SMBus(LINUX_I2C_BUS)
+        self.description = "/dev/i2c-{} (Linux / smbus2)".format(LINUX_I2C_BUS)
+
+    def scan(self):
+        found = []
+        for a in range(0x03, 0x78):
+            try:
+                self._bus.read_byte(a)
+                found.append(a)
+            except OSError:
+                pass
+        return found
+
+    def write_reg(self, reg, val):
+        self._bus.write_byte_data(ADDR, reg, val & 0xFF)
+
+    def read_reg(self, reg):
+        return self._bus.read_byte_data(ADDR, reg)
+
+    def write_block(self, reg, data):
+        self._bus.write_i2c_block_data(ADDR, reg, list(data))
+
+    def read_block(self, reg, n):
+        return self._bus.read_i2c_block_data(ADDR, reg, n)
+
+
+_adapter = None
+
+def _init():
+    global _adapter
+    if _PLATFORM == 'micropython':
+        _adapter = _MicroPythonAdapter()
+    else:
+        _adapter = _LinuxAdapter()
 
 # ── Register addresses ────────────────────────────────────────────────────────
-ADDR        = 0x40
 
-REG_CTRL    = 0x00
-REG_GLB_G   = 0x01
-REG_GLB_R   = 0x02
-REG_GLB_B   = 0x03
-REG_PATTERN = 0x04
-REG_SPEED   = 0x05
-REG_N_LEDS  = 0x06
-REG_SEC_G   = 0x07
-REG_SEC_R   = 0x08
-REG_SEC_B   = 0x09
-REG_PARAM1  = 0x0A
-REG_PAL_SEL = 0x0B
-REG_LED_BASE= 0x0C
+REG_CTRL     = 0x00
+REG_GLB_G    = 0x01
+REG_GLB_R    = 0x02
+REG_GLB_B    = 0x03
+REG_PATTERN  = 0x04
+REG_SPEED    = 0x05
+REG_N_LEDS   = 0x06
+REG_SEC_G    = 0x07
+REG_SEC_R    = 0x08
+REG_SEC_B    = 0x09
+REG_PARAM1   = 0x0A
+REG_PAL_SEL  = 0x0B
+REG_LED_BASE = 0x0C
 
-# CTRL bit masks
-CTRL_RST    = 0x01
-CTRL_GLB    = 0x02
-CTRL_PAT_EN = 0x04
+CTRL_RST     = 0x01
+CTRL_GLB     = 0x02
+CTRL_PAT_EN  = 0x04
 
-# Pattern names (REG_PATTERN values)
 PATTERNS = {
-    0: "OFF",
-    1: "SOLID",
-    2: "CHASE",
-    3: "BLINK",
-    4: "ALTERNATE",
-    5: "WIPE",
-    6: "TWINKLE",
-    7: "RAINBOW",
-    8: "RAINBOW_MTX",
+    0: "OFF",         1: "SOLID",     2: "CHASE",
+    3: "BLINK",       4: "ALTERNATE", 5: "WIPE",
+    6: "TWINKLE",     7: "RAINBOW",   8: "RAINBOW_MTX",
     9: "RETRO_BLINK",
 }
 
-# Palette names (REG_PAL_SEL values)
 PALETTES = {
-    0: "USER",
-    1: "FIRE",
-    2: "OCEAN",
-    3: "FOREST",
-    4: "PARTY",
-    5: "MONO_W",
-    6: "RAINBOW",
-    7: "HEAT",
+    0: "USER",   1: "FIRE",    2: "OCEAN",
+    3: "FOREST", 4: "PARTY",   5: "MONO_W",
+    6: "RAINBOW",7: "HEAT",
 }
 
-# Pretty names for register dump
 REG_NAMES = {
-    REG_CTRL:    "CTRL",
-    REG_GLB_G:   "GLB_G",
-    REG_GLB_R:   "GLB_R",
-    REG_GLB_B:   "GLB_B",
-    REG_PATTERN: "PATTERN",
-    REG_SPEED:   "SPEED",
-    REG_N_LEDS:  "N_LEDS",
-    REG_SEC_G:   "SEC_G",
-    REG_SEC_R:   "SEC_R",
-    REG_SEC_B:   "SEC_B",
-    REG_PARAM1:  "PARAM1",
-    REG_PAL_SEL: "PAL_SEL",
+    REG_CTRL: "CTRL", REG_GLB_G: "GLB_G", REG_GLB_R: "GLB_R",
+    REG_GLB_B: "GLB_B", REG_PATTERN: "PATTERN", REG_SPEED: "SPEED",
+    REG_N_LEDS: "N_LEDS", REG_SEC_G: "SEC_G", REG_SEC_R: "SEC_R",
+    REG_SEC_B: "SEC_B", REG_PARAM1: "PARAM1", REG_PAL_SEL: "PAL_SEL",
 }
 
-# Expected register values after do_reset() (from main.c)
-#   init_color = {0x00, 0xFF, 0x00}  => G=0x00 R=0xFF B=0x00 (pure red on WS2812)
+# Expected values after do_reset() — init_color={0x00,0xFF,0x00} => pure red on WS2812
 RESET_DEFAULTS = {
-    REG_CTRL:    0x00,
-    REG_GLB_G:   0x00,
-    REG_GLB_R:   0xFF,
-    REG_GLB_B:   0x00,
-    REG_PATTERN: 0x01,  # PAT_SOLID
-    REG_SPEED:   0x0A,  # 10
-    REG_N_LEDS:  0x40,  # 64
-    REG_SEC_G:   0x00,
-    REG_SEC_R:   0x00,
-    REG_SEC_B:   0x00,
-    REG_PARAM1:  0x01,
-    REG_PAL_SEL: 0x00,
+    REG_CTRL: 0x00, REG_GLB_G: 0x00, REG_GLB_R: 0xFF, REG_GLB_B: 0x00,
+    REG_PATTERN: 0x01, REG_SPEED: 0x0A, REG_N_LEDS: 0x40,
+    REG_SEC_G: 0x00, REG_SEC_R: 0x00, REG_SEC_B: 0x00,
+    REG_PARAM1: 0x01, REG_PAL_SEL: 0x00,
 }
 
-# Predefined palette PROGMEM values from patterns.c
-# {GLB_G, GLB_R, GLB_B, SEC_G, SEC_R, SEC_B}
+# Predefined palette colours from patterns.c PROGMEM: {GLB_G,GLB_R,GLB_B,SEC_G,SEC_R,SEC_B}
 PALETTE_COLOURS = {
     1: (100, 255,   0,   0, 128,   0),  # FIRE
     2: (255,   0, 255,   0,   0,  64),  # OCEAN
@@ -116,27 +182,14 @@ PALETTE_COLOURS = {
 
 # ── I2C helpers ───────────────────────────────────────────────────────────────
 
-_i2c = None
-
-def _init():
-    global _i2c
-    _i2c = I2C(I2C_BUS, scl=Pin(PIN_SCL), sda=Pin(PIN_SDA), freq=I2C_FREQ)
-
-def wr(reg, val):
-    _i2c.writeto_mem(ADDR, reg, bytes([val & 0xFF]))
-
-def rd(reg):
-    return _i2c.readfrom_mem(ADDR, reg, 1)[0]
-
-def wr_block(reg, data):
-    _i2c.writeto_mem(ADDR, reg, bytes(data))
-
-def rd_block(reg, n):
-    return list(_i2c.readfrom_mem(ADDR, reg, n))
+def wr(reg, val):       _adapter.write_reg(reg, val)
+def rd(reg):            return _adapter.read_reg(reg)
+def wr_block(reg, d):   _adapter.write_block(reg, d)
+def rd_block(reg, n):   return _adapter.read_block(reg, n)
 
 def device_reset():
     wr(REG_CTRL, CTRL_RST)
-    time.sleep_ms(50)
+    sleep_ms(50)
 
 # ── Test framework ────────────────────────────────────────────────────────────
 
@@ -168,7 +221,7 @@ def _check(label, got, expected):
 
 def test_scan():
     print("\n--- I2C Bus Scan ---")
-    found = _i2c.scan()
+    found = _adapter.scan()
     if not found:
         print("  No devices found on bus.")
         return False
@@ -183,8 +236,7 @@ def test_reset():
     print("\n--- Reset Test ---")
     device_reset()
     for reg, expected in RESET_DEFAULTS.items():
-        name = REG_NAMES.get(reg, "0x{:02X}".format(reg))
-        _check(name, rd(reg), expected)
+        _check(REG_NAMES.get(reg, "0x{:02X}".format(reg)), rd(reg), expected)
 
 def test_rw_registers():
     print("\n--- Config Register Read/Write ---")
@@ -222,11 +274,12 @@ def test_led_array():
 
 def test_led_block_write():
     print("\n--- LED Block Write (multi-byte) ---")
-    # Write 4 LEDs in a single transaction
-    data = [0x10, 0x20, 0x30,
-            0x40, 0x50, 0x60,
-            0x70, 0x80, 0x90,
-            0xA0, 0xB0, 0xC0]
+    data = [
+        0x10, 0x20, 0x30,
+        0x40, 0x50, 0x60,
+        0x70, 0x80, 0x90,
+        0xA0, 0xB0, 0xC0,
+    ]
     wr_block(REG_LED_BASE, data)
     back = rd_block(REG_LED_BASE, 12)
     _check("Block write readback", back, data)
@@ -239,24 +292,11 @@ def test_ctrl_bits():
         wr(REG_CTRL, 0x00)
         _check("{} clear".format(name), rd(REG_CTRL) & bit, 0x00)
 
-def test_palette_load():
-    print("\n--- Predefined Palette Load ---")
-    for pal_id, (eg, er, eb, sg, sr, sb) in PALETTE_COLOURS.items():
-        name = PALETTES[pal_id]
-        wr(REG_PAL_SEL, pal_id)
-        time.sleep_ms(10)   # allow main loop to process stop condition
-        _check("{} GLB_G".format(name), rd(REG_GLB_G), eg)
-        _check("{} GLB_R".format(name), rd(REG_GLB_R), er)
-        _check("{} GLB_B".format(name), rd(REG_GLB_B), eb)
-        _check("{} SEC_G".format(name), rd(REG_SEC_G), sg)
-        _check("{} SEC_R".format(name), rd(REG_SEC_R), sr)
-        _check("{} SEC_B".format(name), rd(REG_SEC_B), sb)
-
 def test_pattern_select():
     print("\n--- Pattern Register ---")
-    for pat_id in PATTERNS:
+    for pat_id, name in PATTERNS.items():
         wr(REG_PATTERN, pat_id)
-        _check(PATTERNS[pat_id], rd(REG_PATTERN), pat_id)
+        _check(name, rd(REG_PATTERN), pat_id)
 
 def test_speed_boundary():
     print("\n--- Speed Boundary Values ---")
@@ -264,16 +304,27 @@ def test_speed_boundary():
         wr(REG_SPEED, val)
         _check("SPEED={}".format(val), rd(REG_SPEED), val)
 
+def test_palette_load():
+    print("\n--- Predefined Palette Load ---")
+    for pal_id, (eg, er, eb, sg, sr, sb) in PALETTE_COLOURS.items():
+        name = PALETTES[pal_id]
+        wr(REG_PAL_SEL, pal_id)
+        sleep_ms(10)    # allow ATtiny85 main loop to process stop condition
+        _check("{} GLB_G".format(name), rd(REG_GLB_G), eg)
+        _check("{} GLB_R".format(name), rd(REG_GLB_R), er)
+        _check("{} GLB_B".format(name), rd(REG_GLB_B), eb)
+        _check("{} SEC_G".format(name), rd(REG_SEC_G), sg)
+        _check("{} SEC_R".format(name), rd(REG_SEC_R), sr)
+        _check("{} SEC_B".format(name), rd(REG_SEC_B), sb)
+
 def test_all():
     _reset_counts()
     print("\n" + "=" * 42)
     print(" Running all tests")
     print("=" * 42)
-
     if not test_scan():
-        print("\nDevice not found — aborting test run.")
+        print("\nDevice not found — aborting.")
         return
-
     test_reset()
     test_rw_registers()
     test_led_array()
@@ -282,8 +333,7 @@ def test_all():
     test_pattern_select()
     test_speed_boundary()
     test_palette_load()
-    test_reset()          # leave device in clean state
-
+    test_reset()   # leave device in a clean state
     print("\n" + "=" * 42)
     print(" PASSED: {}   FAILED: {}".format(_pass, _fail))
     print("=" * 42)
@@ -294,8 +344,8 @@ def dump_registers():
     print("\n  Addr  Register     Value  Detail")
     print("  ----  -----------  -----  ------")
     for reg in range(REG_PAL_SEL + 1):
-        name = REG_NAMES.get(reg, "?")
-        val  = rd(reg)
+        name   = REG_NAMES.get(reg, "?")
+        val    = rd(reg)
         detail = ""
         if reg == REG_CTRL:
             parts = []
@@ -308,11 +358,11 @@ def dump_registers():
         elif reg == REG_PAL_SEL:
             detail = PALETTES.get(val, "?")
         print("  0x{:02X}  {:<12} 0x{:02X}   {}".format(reg, name, val, detail))
-
     print("\n  LEDs (first 4):")
     for i in range(4):
         d = rd_block(REG_LED_BASE + i * 3, 3)
-        print("    LED[{}]  G=0x{:02X}  R=0x{:02X}  B=0x{:02X}".format(i, d[0], d[1], d[2]))
+        print("    LED[{}]  G=0x{:02X}  R=0x{:02X}  B=0x{:02X}".format(
+            i, d[0], d[1], d[2]))
 
 def _prompt_int(prompt, lo, hi):
     try:
@@ -341,17 +391,27 @@ def cmd_set_palette():
     v = _prompt_int("  Palette ID: ", 0, 7)
     if v is not None:
         wr(REG_PAL_SEL, v)
-        time.sleep_ms(10)
-        print("  Palette loaded: {}".format(PALETTES[v]))
+        sleep_ms(10)
+        print("  Loaded {}".format(PALETTES[v]))
 
 def cmd_set_colour(label, g_reg, r_reg, b_reg):
-    print("  Set {} colour (each 0-255, WS2812 is G R B order)".format(label))
+    print("  Set {} colour (WS2812 order: G R B, each 0-255)".format(label))
     g = _prompt_int("  G: ", 0, 255)
     r = _prompt_int("  R: ", 0, 255)
     b = _prompt_int("  B: ", 0, 255)
     if None not in (g, r, b):
         wr(g_reg, g); wr(r_reg, r); wr(b_reg, b)
         print("  {} = G:{} R:{} B:{}".format(label, g, r, b))
+
+def cmd_set_led():
+    i = _prompt_int("  LED index (0-63): ", 0, 63)
+    if i is None: return
+    g = _prompt_int("  G (0-255): ", 0, 255)
+    r = _prompt_int("  R (0-255): ", 0, 255)
+    b = _prompt_int("  B (0-255): ", 0, 255)
+    if None not in (g, r, b):
+        wr_block(REG_LED_BASE + i * 3, [g, r, b])
+        print("  LED[{}] = G:{} R:{} B:{}".format(i, g, r, b))
 
 def cmd_set_speed():
     v = _prompt_int("  Speed (1=fastest, 255=slowest): ", 1, 255)
@@ -370,17 +430,6 @@ def cmd_set_param1():
     if v is not None:
         wr(REG_PARAM1, v)
         print("  PARAM1 = {}".format(v))
-
-def cmd_set_led():
-    i = _prompt_int("  LED index (0-63): ", 0, 63)
-    if i is None:
-        return
-    g = _prompt_int("  G (0-255): ", 0, 255)
-    r = _prompt_int("  R (0-255): ", 0, 255)
-    b = _prompt_int("  B (0-255): ", 0, 255)
-    if None not in (g, r, b):
-        wr_block(REG_LED_BASE + i * 3, [g, r, b])
-        print("  LED[{}] = G:{} R:{} B:{}".format(i, g, r, b))
 
 def cmd_toggle_pat_en():
     ctrl = rd(REG_CTRL)
@@ -404,7 +453,7 @@ def cmd_reset():
     device_reset()
     print("  Device reset complete.")
 
-# ── Menu ──────────────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 MENU = """
 +--------------------------------------+
@@ -434,10 +483,11 @@ MENU = """
 
 def main():
     print("\nSpace Unicorn I2C Register Test Tool")
-    print("Initialising I2C{} SCL=GP{} SDA=GP{} {}kHz ...".format(
-        I2C_BUS, PIN_SCL, PIN_SDA, I2C_FREQ // 1000))
+    print("Platform: " + _PLATFORM)
+    print("Initialising I2C...")
     _init()
-    print("Ready. Target 0x{:02X}".format(ADDR))
+    print(_adapter.description)
+    print("Target: 0x{:02X}".format(ADDR))
 
     while True:
         print(MENU)
@@ -468,7 +518,7 @@ def main():
             else: print("  Unknown command '{}'. Type q to quit.".format(cmd))
         except OSError as exc:
             print("  I2C error: {}".format(exc))
-            print("  Check wiring and that device is powered.")
+            print("  Check wiring and that the device is powered.")
 
     print("Bye.")
 
