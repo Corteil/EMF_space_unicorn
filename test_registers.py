@@ -211,11 +211,16 @@ def _fail_msg(msg):
     _fail += 1
     print("  [FAIL] " + msg)
 
+def _fmt(v):
+    if isinstance(v, list):
+        return "[" + ", ".join("0x{:02X}".format(x) for x in v) + "]"
+    return "0x{:02X}".format(v)
+
 def _check(label, got, expected):
     if got == expected:
-        _ok("{}: 0x{:02X}".format(label, got))
+        _ok("{}: {}".format(label, _fmt(got)))
     else:
-        _fail_msg("{}: expected 0x{:02X}, got 0x{:02X}".format(label, expected, got))
+        _fail_msg("{}: expected {}, got {}".format(label, _fmt(expected), _fmt(got)))
 
 # ── Automated tests ───────────────────────────────────────────────────────────
 
