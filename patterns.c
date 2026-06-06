@@ -143,11 +143,12 @@ static void pat_alternate(struct pat_state *s, uint8_t n)
 /* Fill LEDs one by one left→right, then clear one by one. */
 static void pat_wipe(struct pat_state *s, uint8_t n, uint8_t advance)
 {
-    uint8_t cycle, wpos;
+    uint16_t cycle;
+    uint8_t wpos;
 
     if (!advance) return;
 
-    cycle = n + n;
+    cycle = (uint16_t)n + n;   /* uint16_t prevents overflow when n=128 */
     wpos  = s->pos % cycle;
     if (wpos < n)
         write_led(wpos,     REG_GLB_G, REG_GLB_R, REG_GLB_B);
