@@ -63,19 +63,30 @@ sudo apt install gcc-avr avr-libc binutils-avr avrdude
 git clone --recurse-submodules https://github.com/your-repo/space-unicorn-firmware
 cd space-unicorn-firmware
 
-make        # build and flash (requires USBasp connected)
-make fuses  # set fuses on a fresh chip (8 MHz internal RC, no divider)
+make fuses  # MUST be run once on any new or replacement chip
+make        # build and flash
 ```
 
-The default programmer is **USBasp**. To use a different programmer edit the
-top of `Makefile`:
+The default programmer is **Atmel-ICE (ISP)**. To use a different programmer
+edit the top of `Makefile`:
 
 ```makefile
-AVRDUDE_PROGRAMMER = arduino    # or linuxspi, avrisp2, usbtiny, ...
-AVRDUDE_PORT       = /dev/ttyUSB0
+AVRDUDE_PROGRAMMER = usbasp     # or linuxspi, avrisp2, usbtiny, ...
+AVRDUDE_PORT       = usb
 ```
 
 A pre-built `main.hex` is included in the repository if you only need to flash.
+
+### Fuses — required on every fresh chip
+
+> **Important:** ATtiny85 chips ship from the factory with `CKDIV8` programmed,
+> running the CPU at 1 MHz. The WS2812 driver requires exactly 8 MHz. With the
+> wrong clock the NeoPixels will be **stuck solid white** and the button will be
+> unresponsive.
+>
+> Run `make fuses` once whenever fitting a new or replacement chip. This sets
+> `LFUSE=0xE2` (8 MHz internal RC, no divider) and is safe to re-run on a
+> chip that is already correctly programmed.
 
 ---
 
@@ -83,7 +94,7 @@ A pre-built `main.hex` is included in the repository if you only need to flash.
 
 | Section | Used    | Available |
 |---------|---------|-----------|
-| Flash   | 2772 B  | 8192 B    |
+| Flash   | 2890 B  | 8192 B    |
 | RAM     | 225 B   | 512 B     |
 
 ---
