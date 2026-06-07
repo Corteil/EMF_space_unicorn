@@ -170,6 +170,8 @@ void swirly(void)
         while (tmp--) {
             if (i2c_check_stop())
                 return;
+            if (btn_event)
+                return;
             _delay_ms(1);
         }
     }
@@ -226,6 +228,11 @@ inner:
             uint8_t next = REG_PATTERN + 1;
             if (next > PAT_RETRO_BLINK) next = PAT_SOLID;
             REG_PATTERN = next;
+            if (!REG_GLB_G && !REG_GLB_R && !REG_GLB_B) {
+                REG_GLB_G = pgm_read_byte(init_color);
+                REG_GLB_R = pgm_read_byte(init_color + 1);
+                REG_GLB_B = pgm_read_byte(init_color + 2);
+            }
             REG_CTRL |= CTRL_PAT_EN;
             pat_init(&pat);
         }
