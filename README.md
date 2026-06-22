@@ -10,6 +10,20 @@ Based on [neopixel_i2c](https://github.com/usedbytes/neopixel_i2c) by
 
 ---
 
+## Project links
+
+The Space Unicorn is an EMF 2026 hexpansion — an ATtiny85 driving WS2812
+NeoPixels, controlled over I²C from a Tildagon badge.
+
+- 🦄 **Tildagon control app** — drive patterns, palettes, colour and speed from
+  the badge: <https://github.com/Corteil/tildagon-space-unicorn>
+- 📟 **This repo** — firmware and PCB design files:
+  <https://github.com/Corteil/EMF_space_unicorn>
+- 📇 **EMF hexpansion registry** — VID `0x1969` / PID `0x5355`, for OTA firmware:
+  <https://github.com/emfcamp/hexpansion-firmwares/tree/main/0x1969/0x5355>
+
+---
+
 ## Hardware
 
 ATtiny85 pin assignments:
@@ -60,8 +74,8 @@ Requires `avr-gcc`, `avr-libc`, and `avrdude`.
 ```bash
 sudo apt install gcc-avr avr-libc binutils-avr avrdude
 
-git clone --recurse-submodules https://github.com/your-repo/space-unicorn-firmware
-cd space-unicorn-firmware
+git clone --recurse-submodules https://github.com/Corteil/EMF_space_unicorn
+cd EMF_space_unicorn
 
 make fuses  # MUST be run once on any new or replacement chip
 make        # build and flash
