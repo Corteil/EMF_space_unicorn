@@ -4,6 +4,10 @@ ATtiny85 I2C slave firmware for driving WS2812 NeoPixel LEDs with animated
 patterns, predefined colour palettes, and a user button for live pattern
 cycling. Built for the EMF26 Space Unicorn board.
 
+| Front | Rear |
+|:-----:|:----:|
+| ![Space Unicorn PCB — front](hardware/renders/hexpansion6.png) | ![Space Unicorn PCB — rear](hardware/renders/hexpansion6-rear.png) |
+
 Based on [neopixel_i2c](https://github.com/usedbytes/neopixel_i2c) by
 **Brian Starkey (usedbytes)**, with the WinAVR Makefile originally written by
 **Eric B. Weddington, Jörg Wunsch et al.** and modified by **Elliot Williams**.
