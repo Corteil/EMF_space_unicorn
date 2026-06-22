@@ -2,7 +2,9 @@
 
 KiCad design files for the EMF26 Space Unicorn hexpansion.
 
-![Space Unicorn PCB](renders/hexpansion6.png)
+| Front | Rear |
+|:-----:|:----:|
+| ![Space Unicorn PCB — front](renders/hexpansion6.png) | ![Space Unicorn PCB — rear](renders/hexpansion6-rear.png) |
 
 ## Contents
 
