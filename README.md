@@ -17,14 +17,17 @@ NeoPixels, controlled over I²C from a Tildagon badge.
 
 - 🦄 **Tildagon control app** — drive patterns, palettes, colour and speed from
   the badge: <https://github.com/Corteil/tildagon-space-unicorn>
-- 📟 **This repo** — firmware and PCB design files:
-  <https://github.com/Corteil/EMF_space_unicorn>
+- 📟 **This repo** — firmware (root) and the KiCad PCB design
+  ([`hardware/`](hardware/)).
 - 📇 **EMF hexpansion registry** — VID `0x1969` / PID `0x5355`, for OTA firmware:
   <https://github.com/emfcamp/hexpansion-firmwares/tree/main/0x1969/0x5355>
 
 ---
 
 ## Hardware
+
+The full KiCad design (schematic, board, footprint libraries, gerbers and
+renders) is in [`hardware/`](hardware/).
 
 ATtiny85 pin assignments:
 
