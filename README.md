@@ -1,8 +1,9 @@
-# Space Unicorn — NeoPixel Pattern Firmware
+# 🦄 Space Unicorn — EMF 2026 Hexpansion
 
-ATtiny85 I2C slave firmware for driving WS2812 NeoPixel LEDs with animated
-patterns, predefined colour palettes, and a user button for live pattern
-cycling. Built for the EMF26 Space Unicorn board.
+A WS2812 NeoPixel hexpansion for the EMF Tildagon badge. An ATtiny85 I²C slave
+drives the LEDs with animated patterns, predefined colour palettes and a user
+button for live pattern cycling. This repository holds the firmware and the
+KiCad hardware design.
 
 | Front | Rear |
 |:-----:|:----:|
@@ -50,7 +51,7 @@ ATtiny85 pin assignments:
     +--------+----------+----------+-----+-------+
     |        |                     |     |       |
     |       |"| 10k                |     |       |
-    |       |_|                   |"| 2k2 |"| 2k2
+    |       |_|                   |"| 10k |"| 10k
     |        |   +--ATtiny85--+   |_|   |_|
     |        +---| Reset  Vcc |----+     |
     |            |            |          |
@@ -66,7 +67,7 @@ ATtiny85 pin assignments:
     +--[ LED ]--[ 330R ]-- GND                            Heartbeat LED (PB1)
 ```
 
-Pull-ups: 2.2 kΩ on SCL and SDA to VCC. 10 kΩ on RESET to VCC.
+Pull-ups: 10 kΩ on SCL, SDA and RESET to VCC.
 
 ---
 
