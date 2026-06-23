@@ -8,10 +8,6 @@ cycling. Built for the EMF26 Space Unicorn board.
 |:-----:|:----:|
 | ![Space Unicorn PCB — front](hardware/renders/hexpansion6.png) | ![Space Unicorn PCB — rear](hardware/renders/hexpansion6-rear.png) |
 
-Based on [neopixel_i2c](https://github.com/usedbytes/neopixel_i2c) by
-**Brian Starkey (usedbytes)**, with the WinAVR Makefile originally written by
-**Eric B. Weddington, Jörg Wunsch et al.** and modified by **Elliot Williams**.
-
 ---
 
 ## Project links
