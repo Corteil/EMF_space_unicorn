@@ -1,6 +1,6 @@
 # 🦄 Space Unicorn — EMF 2026 Hexpansion
 
-A WS2812 NeoPixel hexpansion for the EMF Tildagon badge. An ATtiny85 I²C slave
+A WS2812 NeoPixel hexpansion for the EMF Tildagon badge. An ATtiny85 setup as an I²C client
 drives the LEDs with animated patterns, predefined colour palettes and a user
 button for live pattern cycling. This repository holds the firmware and the
 KiCad hardware design.
