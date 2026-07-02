@@ -5,16 +5,19 @@
 extern volatile uint8_t i2c_reg[];
 
 /*
+ * Buffer-free pattern engine.
+ *
+ * There is no per-LED frame buffer: compute_led() produces each pixel's colour
+ * on demand as the WS2812 stream is clocked out. Patterns that would otherwise
+ * need a multiply or divide per pixel (rainbow hue = i * step, matrix row/col =
+ * i / cols) instead advance a running accumulator, which works because LEDs are
+ * always streamed in ascending index order. The ATtiny85 has no hardware
+ * multiplier, so this keeps the inner loop short enough to avoid a WS2812 latch.
+ */
+
+/*
  * Predefined palettes stored in flash: {pri_G, pri_R, pri_B, sec_G, sec_R, sec_B}
  * WS2812 byte order is G, R, B.
- *
- * PAL_FIRE(1): orange / dark-red
- * PAL_OCEAN(2): cyan / deep-blue
- * PAL_FOREST(3): lime / dark-green
- * PAL_PARTY(4): red / blue
- * PAL_MONO_W(5): white / dim-white
- * PAL_RAINBOW(6): red / blue  (pair used by non-rainbow patterns; rainbow pattern ignores it)
- * PAL_HEAT(7): red / yellow
  */
 static const uint8_t predefined_palettes[7][6] PROGMEM = {
     /* 1 FIRE    */ { 100, 255,   0,   0, 128,   0 },
@@ -26,26 +29,23 @@ static const uint8_t predefined_palettes[7][6] PROGMEM = {
     /* 7 HEAT    */ {   0, 255,   0, 200, 255,   0 },
 };
 
-/* One bit per LED; sized for the compile-time maximum */
-static uint8_t blink_map[(N_LEDS + 7) / 8];
+/* Per-frame constants, recomputed once by pat_prep() then read by compute_led() */
+static uint16_t s_head;        /* chase comet head */
+static uint16_t s_eye;         /* larson eye position */
+static uint16_t s_wpos;        /* wipe fill/clear position */
+static uint8_t  s_hue;         /* rainbow running hue (advances per LED) */
+static uint8_t  s_col;         /* matrix column accumulator */
+static uint8_t  s_row;         /* matrix row accumulator */
+static uint8_t  s_phase;       /* blink/alternate parity */
+static uint8_t  s_retro_gen;   /* retro-blink generation seed */
 
 /* ------------------------------------------------------------------ */
-/* Utility functions                                                    */
+/* Utilities                                                            */
 /* ------------------------------------------------------------------ */
-
-/* 8-bit Galois LFSR, polynomial 0xB8, period 255. State must never be 0. */
-static uint8_t lfsr_tick(uint8_t v)
-{
-    uint8_t lsb = v & 1;
-    v >>= 1;
-    if (lsb) v ^= 0xB8;
-    return v;
-}
 
 /*
  * Convert hue (0-255) to RGB using a 6-segment piecewise approximation.
- * No division, no floats: frac*6 computed as (frac<<2)+(frac<<1).
- * Outputs are in WS2812 wire order: *g, *r, *b.
+ * No division, no floats. Outputs are in WS2812 wire order: *g, *r, *b.
  */
 static void hue_to_rgb(uint8_t hue, uint8_t *g, uint8_t *r, uint8_t *b)
 {
@@ -62,174 +62,22 @@ static void hue_to_rgb(uint8_t hue, uint8_t *g, uint8_t *r, uint8_t *b)
     q = 255 - t;
 
     switch (seg) {
-        case 0: *r = 255; *g = t;   *b = 0;   break; /* red → yellow  */
-        case 1: *r = q;   *g = 255; *b = 0;   break; /* yellow → green */
-        case 2: *r = 0;   *g = 255; *b = t;   break; /* green → cyan   */
-        case 3: *r = 0;   *g = q;   *b = 255; break; /* cyan → blue    */
-        case 4: *r = t;   *g = 0;   *b = 255; break; /* blue → magenta */
-        default:*r = 255; *g = 0;   *b = q;   break; /* magenta → red  */
+        case 0: *r = 255; *g = t;   *b = 0;   break; /* red -> yellow   */
+        case 1: *r = q;   *g = 255; *b = 0;   break; /* yellow -> green */
+        case 2: *r = 0;   *g = 255; *b = t;   break; /* green -> cyan   */
+        case 3: *r = 0;   *g = q;   *b = 255; break; /* cyan -> blue    */
+        case 4: *r = t;   *g = 0;   *b = 255; break; /* blue -> magenta */
+        default:*r = 255; *g = 0;   *b = q;   break; /* magenta -> red  */
     }
 }
 
-/* Write one LED into the i2c_reg LED buffer. i*3 computed without multiply. */
-static inline void write_led(uint8_t i, uint8_t g, uint8_t r, uint8_t b)
+/* Cheap 8-bit avalanche hash for deterministic per-LED pseudo-randomness. */
+static uint8_t hash8(uint8_t x)
 {
-    volatile uint8_t *p = i2c_reg + I2C_N_GLB_REG + i + (i << 1); /* i*3 */
-    *p++ = g;
-    *p++ = r;
-    *p   = b;
-}
-
-/* ------------------------------------------------------------------ */
-/* Pattern functions                                                    */
-/* ------------------------------------------------------------------ */
-
-static void pat_off(uint8_t n)
-{
-    uint8_t i;
-    for (i = 0; i < n; i++)
-        write_led(i, 0, 0, 0);
-}
-
-static void pat_solid(uint8_t n)
-{
-    uint8_t i;
-    for (i = 0; i < n; i++)
-        write_led(i, REG_GLB_G, REG_GLB_R, REG_GLB_B);
-}
-
-/* Scrolling comet: dim entire buffer by >>1 each advance, place bright head. */
-static void pat_chase(struct pat_state *s, uint8_t n, uint8_t advance)
-{
-    volatile uint8_t *base;
-    uint8_t i, head;
-
-    if (!advance) return;
-
-    base = i2c_reg + I2C_N_GLB_REG;
-    for (i = 0; i < n; i++) {
-        base[i + (i << 1)]     >>= 1;
-        base[i + (i << 1) + 1] >>= 1;
-        base[i + (i << 1) + 2] >>= 1;
-    }
-
-    head = s->pos % n;
-    write_led(head, REG_GLB_G, REG_GLB_R, REG_GLB_B);
-}
-
-/* All LEDs toggle between primary color and off. */
-static void pat_blink(struct pat_state *s, uint8_t n, uint8_t advance)
-{
-    if (!advance) return;
-    if (s->pos & 1)
-        pat_solid(n);
-    else
-        pat_off(n);
-}
-
-/* Even LEDs = primary, odd = secondary; groups swap each advance. */
-static void pat_alternate(struct pat_state *s, uint8_t n)
-{
-    uint8_t phase = s->pos & 1;
-    uint8_t i;
-    for (i = 0; i < n; i++) {
-        if ((i & 1) == phase)
-            write_led(i, REG_GLB_G, REG_GLB_R, REG_GLB_B);
-        else
-            write_led(i, REG_SEC_G, REG_SEC_R, REG_SEC_B);
-    }
-}
-
-/* Fill LEDs one by one left→right, then clear one by one. */
-static void pat_wipe(struct pat_state *s, uint8_t n, uint8_t advance)
-{
-    uint16_t cycle;
-    uint8_t wpos;
-
-    if (!advance) return;
-
-    cycle = (uint16_t)n + n;   /* uint16_t prevents overflow when n=128 */
-    wpos  = s->pos % cycle;
-    if (wpos < n)
-        write_led(wpos,     REG_GLB_G, REG_GLB_R, REG_GLB_B);
-    else
-        write_led(wpos - n, 0, 0, 0);
-}
-
-/* Random LED lights up; all others fade by >>1 each advance. */
-static void pat_twinkle(struct pat_state *s, uint8_t n, uint8_t advance)
-{
-    volatile uint8_t *base;
-    uint8_t i, idx;
-
-    if (!advance) return;
-
-    base = i2c_reg + I2C_N_GLB_REG;
-    for (i = 0; i < n; i++) {
-        base[i + (i << 1)]     >>= 1;
-        base[i + (i << 1) + 1] >>= 1;
-        base[i + (i << 1) + 2] >>= 1;
-    }
-
-    s->lfsr = lfsr_tick(s->lfsr);
-    idx = s->lfsr % n;
-    write_led(idx, REG_GLB_G, REG_GLB_R, REG_GLB_B);
-}
-
-/* Hue cycles across the strip with rotation driven by pos. */
-static void pat_rainbow(struct pat_state *s, uint8_t n)
-{
-    uint8_t i, g, r, b;
-    for (i = 0; i < n; i++) {
-        /* i*5 = (i<<2)+i spreads ~51 LEDs across the full hue wheel */
-        hue_to_rgb(s->pos + (i << 2) + i, &g, &r, &b);
-        write_led(i, g, r, b);
-    }
-}
-
-/*
- * Diagonal rainbow across an 8x8 grid with rotation.
- * REG_PARAM1 bit 0: 0 = row-major wiring, 1 = serpentine (zigzag) wiring.
- */
-static void pat_rainbow_matrix(struct pat_state *s, uint8_t n)
-{
-    uint8_t i, row, col, g, r, b;
-    for (i = 0; i < n; i++) {
-        row = i >> 3;
-        col = i & 7;
-        if ((REG_PARAM1 & 1) && (row & 1))
-            col = 7 - col;
-        hue_to_rgb(((col + row) << 4) + s->pos, &g, &r, &b);
-        write_led(i, g, r, b);
-    }
-}
-
-/*
- * 50s-computer effect: random LEDs toggle independently.
- * REG_PARAM1 controls how many LEDs flip per advance (1-8).
- */
-static void pat_retro_blink(struct pat_state *s, uint8_t n, uint8_t advance)
-{
-    uint8_t count, c, i, idx;
-
-    if (!advance) return;
-
-    count = REG_PARAM1;
-    if (count < 1) count = 1;
-    if (count > 8) count = 8;
-
-    for (c = 0; c < count; c++) {
-        s->lfsr = lfsr_tick(s->lfsr);
-        idx = s->lfsr % n;
-        blink_map[idx >> 3] ^= (1 << (idx & 7));
-    }
-
-    for (i = 0; i < n; i++) {
-        if (blink_map[i >> 3] & (1 << (i & 7)))
-            write_led(i, REG_GLB_G, REG_GLB_R, REG_GLB_B);
-        else
-            write_led(i, 0, 0, 0);
-    }
+    x ^= (uint8_t)(x << 3);
+    x ^= (uint8_t)(x >> 5);
+    x ^= (uint8_t)(x << 1);
+    return x;
 }
 
 /* ------------------------------------------------------------------ */
@@ -238,49 +86,175 @@ static void pat_retro_blink(struct pat_state *s, uint8_t n, uint8_t advance)
 
 void pat_init(struct pat_state *s)
 {
-    uint8_t i;
     s->pos  = 0;
     s->tick = 0;
-    s->lfsr = 1; /* LFSR state must never be 0 */
-    for (i = 0; i < (uint8_t)sizeof(blink_map); i++)
-        blink_map[i] = 0;
+    s->lfsr = 1;
 }
 
-void pat_tick(struct pat_state *s)
+uint8_t pat_is_animated(uint8_t pattern)
 {
-    uint8_t speed   = REG_SPEED  ? REG_SPEED  : 1;
-    uint8_t n       = REG_N_LEDS ? REG_N_LEDS : N_LEDS;
-    uint8_t advance = 0;
+    return (pattern != PAT_OFF && pattern != PAT_SOLID);
+}
 
-    if (n > N_LEDS) n = N_LEDS; /* clamp to compile-time max */
+uint8_t pat_tick(struct pat_state *s)
+{
+    uint8_t speed = REG_SPEED ? REG_SPEED : 1;
 
     if (++s->tick >= speed) {
         s->tick = 0;
         s->pos++;
-        advance = 1;
+        return 1;
     }
+    return 0;
+}
+
+void pat_prep(struct pat_state *s, uint16_t n)
+{
+    if (n == 0)
+        n = 1;
+
+    s_phase = (uint8_t)(s->pos & 1);
 
     switch (REG_PATTERN) {
-        case PAT_OFF:          pat_off(n);                         break;
-        case PAT_SOLID:        pat_solid(n);                       break;
-        case PAT_CHASE:        pat_chase(s, n, advance);           break;
-        case PAT_BLINK:        pat_blink(s, n, advance);           break;
-        case PAT_ALTERNATE:    pat_alternate(s, n);                break;
-        case PAT_WIPE:         pat_wipe(s, n, advance);            break;
-        case PAT_TWINKLE:      pat_twinkle(s, n, advance);         break;
-        case PAT_RAINBOW:      pat_rainbow(s, n);                  break;
-        case PAT_RAINBOW_MTX:  pat_rainbow_matrix(s, n);           break;
-        case PAT_RETRO_BLINK:  pat_retro_blink(s, n, advance);    break;
-        default:               pat_off(n);                         break;
+    case PAT_CHASE:
+        s_head = s->pos % n;
+        break;
+    case PAT_WIPE:
+        s_wpos = s->pos % (uint16_t)(n + n);
+        break;
+    case PAT_LARSON: {
+        uint16_t span  = (n > 1) ? (n - 1) : 1;
+        uint16_t cycle = span + span;
+        uint16_t p     = s->pos % cycle;
+        s_eye = (p <= span) ? p : (cycle - p);
+        break;
+    }
+    case PAT_RAINBOW:
+        s_hue = (uint8_t)s->pos;
+        break;
+    case PAT_RAINBOW_MTX:
+        s_col = 0;
+        s_row = 0;
+        break;
+    case PAT_RETRO_BLINK: {
+        uint8_t flips = REG_PARAM1 ? REG_PARAM1 : 1;
+        s_retro_gen = (uint8_t)((uint8_t)s->pos * flips);
+        break;
+    }
+    default:
+        break;
     }
 }
 
-/* Copy a predefined palette from flash into REG_GLB and REG_SEC registers. */
+void compute_led(struct pat_state *s, uint16_t i, uint16_t n, struct cRGB *out)
+{
+    switch (REG_PATTERN) {
+
+    case PAT_SOLID:
+        out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B;
+        break;
+
+    case PAT_CHASE: {
+        /* comet: head brightest, exponential fade over a trailing tail */
+        uint16_t d = (s_head >= i) ? (s_head - i) : (s_head + n - i);
+        uint8_t tail = REG_PARAM1 ? REG_PARAM1 : 1;
+        if (d < tail) {
+            uint8_t sh = (d < 7) ? (uint8_t)d : 7;
+            out->g = REG_GLB_G >> sh;
+            out->r = REG_GLB_R >> sh;
+            out->b = REG_GLB_B >> sh;
+        } else {
+            out->g = 0; out->r = 0; out->b = 0;
+        }
+        break;
+    }
+
+    case PAT_BLINK:
+        if (s_phase) { out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B; }
+        else         { out->g = 0; out->r = 0; out->b = 0; }
+        break;
+
+    case PAT_ALTERNATE:
+        if ((uint8_t)(i & 1) == s_phase) {
+            out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B;
+        } else {
+            out->g = REG_SEC_G; out->r = REG_SEC_R; out->b = REG_SEC_B;
+        }
+        break;
+
+    case PAT_WIPE: {
+        uint8_t on = (s_wpos < n) ? (i <= s_wpos) : (i > (s_wpos - n));
+        if (on) { out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B; }
+        else    { out->g = 0; out->r = 0; out->b = 0; }
+        break;
+    }
+
+    case PAT_TWINKLE: {
+        /* fraction of LEDs (density) sparkle, each fading on its own phase */
+        uint8_t h = hash8((uint8_t)i);
+        uint8_t density = REG_PARAM1 ? REG_PARAM1 : 1;   /* 1-8 */
+        if ((h & 7) < density) {
+            uint8_t d = ((uint8_t)s->pos + h) & 7;       /* 0..7 fade ramp */
+            out->g = REG_GLB_G >> d;
+            out->r = REG_GLB_R >> d;
+            out->b = REG_GLB_B >> d;
+        } else {
+            out->g = 0; out->r = 0; out->b = 0;
+        }
+        break;
+    }
+
+    case PAT_RAINBOW:
+        hue_to_rgb(s_hue, &out->g, &out->r, &out->b);
+        s_hue += REG_PARAM2 ? REG_PARAM2 : 5;
+        break;
+
+    case PAT_RAINBOW_MTX: {
+        uint8_t ncols = REG_N_COLS ? REG_N_COLS : 8;
+        uint8_t c = s_col;
+        if ((REG_PARAM1 & 1) && (s_row & 1))
+            c = ncols - 1 - s_col;
+        hue_to_rgb((uint8_t)(((c + s_row) << 4) + (uint8_t)s->pos),
+                   &out->g, &out->r, &out->b);
+        if (++s_col >= ncols) { s_col = 0; s_row++; }
+        break;
+    }
+
+    case PAT_RETRO_BLINK: {
+        uint8_t h = hash8((uint8_t)((uint8_t)i ^ s_retro_gen));
+        if (h & 1) { out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B; }
+        else       { out->g = 0; out->r = 0; out->b = 0; }
+        break;
+    }
+
+    case PAT_LARSON: {
+        uint16_t d = (s_eye >= i) ? (s_eye - i) : (i - s_eye);
+        uint8_t tail = REG_PARAM1 ? REG_PARAM1 : 1;      /* 1-32 */
+        if (d < tail) {
+            uint8_t sh = (d < 7) ? (uint8_t)d : 7;
+            out->g = REG_GLB_G >> sh;
+            out->r = REG_GLB_R >> sh;
+            out->b = REG_GLB_B >> sh;
+        } else {
+            out->g = 0; out->r = 0; out->b = 0;
+        }
+        break;
+    }
+
+    case PAT_OFF:
+    default:
+        out->g = 0; out->r = 0; out->b = 0;
+        break;
+    }
+}
+
+/* Copy a predefined palette from flash into the primary/secondary registers. */
 void load_palette(uint8_t pal_id)
 {
     const uint8_t *src;
 
-    if (pal_id == 0 || pal_id > 7) return;
+    if (pal_id == 0 || pal_id > 7)
+        return;
     src = predefined_palettes[pal_id - 1];
 
     REG_GLB_G = pgm_read_byte(&src[0]);
