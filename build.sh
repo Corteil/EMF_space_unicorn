@@ -2,10 +2,20 @@
 # Build the Space Unicorn firmware without GNU make, using the Arduino-bundled
 # AVR toolchain. Produces main.hex (flash) and main.eep (EEPROM, usually empty).
 #
-#   ./build.sh            # compile + link + hex, print size
-#   ./build.sh flash      # ... then flash via the AVRISP mkII
-#   ./build.sh fuses      # write 8 MHz fuses (virgin chips only)
+#   ./build.sh                       # compile + link + hex, print size
+#   ./build.sh flash                 # ... then flash via ISP
+#   ./build.sh fuses                 # write 8 MHz fuses (virgin chips only)
+#
+# Choose the programmer with PROGRAMMER (avrdude -c id), default atmelice_isp:
+#   PROGRAMMER=atmelice_isp ./build.sh flash    # Atmel-ICE
+#   PROGRAMMER=avrispmkII   ./build.sh flash    # AVRISP mkII
+#   PROGRAMMER=usbasp       ./build.sh flash    # USBasp
+# On Windows the programmer needs a libusbK/WinUSB driver (via Zadig) for
+# avrdude 8.0 (libusb-1.0); libusb-win32 does NOT work. Alternatively, flash
+# main.hex directly from Microchip Studio.
 set -e
+
+PROGRAMMER="${PROGRAMMER:-atmelice_isp}"
 
 TOOLS="$HOME/AppData/Local/Arduino15/packages/arduino/tools"
 AVRGCC="$(ls -d "$TOOLS"/avr-gcc/*/bin | head -1)"
@@ -32,8 +42,8 @@ avr-objcopy -j .eeprom --set-section-flags=.eeprom="alloc,load" \
 echo "== size =="
 avr-size -C --mcu=$MCU $TARGET.elf
 
-# AVRISP mkII: avrdude programmer id "avrispmkII", USB
-AVRDUDE_FLAGS="-C $AVRDUDE_ETC/avrdude.conf -p $MCU -c avrispmkII -P usb"
+echo "== programmer: $PROGRAMMER =="
+AVRDUDE_FLAGS="-C $AVRDUDE_ETC/avrdude.conf -p $MCU -c $PROGRAMMER -P usb"
 
 case "$1" in
   flash)

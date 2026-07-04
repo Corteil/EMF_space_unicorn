@@ -31,16 +31,17 @@
 struct pat_state {
     uint16_t pos;    /* animation frame counter (16-bit: scans across all LEDs) */
     uint8_t  tick;   /* speed prescaler counter */
-    uint8_t  lfsr;   /* LFSR seed — must never be 0 */
+    uint16_t lfsr;   /* LFSR seed — must never be 0 */
 };
 
 void pat_init(struct pat_state *s);
 
 /*
- * Advance the animation by one prescaler tick.
+ * Advance the animation by one prescaler tick (n = active LED count, needed
+ * by patterns that reseed random state, e.g. Retro Blink/Twinkle).
  * Returns non-zero when the frame counter advanced (i.e. a redraw is due).
  */
-uint8_t pat_tick(struct pat_state *s);
+uint8_t pat_tick(struct pat_state *s, uint16_t n);
 
 /*
  * Recompute per-frame constants (head/eye position, accumulator seeds) for the

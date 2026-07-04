@@ -197,14 +197,17 @@ static void apply_fallback(void)
 /* Buffer-free frame streaming                                          */
 /* ------------------------------------------------------------------ */
 
-static void stream_frame(void)
+static inline uint16_t active_n_leds(void)
 {
     uint16_t n = ((uint16_t)REG_N_LEDS_HI << 8) | REG_N_LEDS_LO;
+    return n ? n : 64;
+}
+
+static void stream_frame(void)
+{
+    uint16_t n = active_n_leds();
     uint16_t i;
     uint8_t  sreg;
-
-    if (n == 0)
-        n = 64;
 
     if (REG_CTRL & CTRL_IDX_EN) {
         /* Index mode is bounded by the size of the packed index buffer */
@@ -225,10 +228,16 @@ static void stream_frame(void)
         if (REG_CTRL & CTRL_IDX_EN) {
             uint8_t byte = i2c_reg[IDX_BASE + (i >> 1)];
             uint8_t idx  = (i & 1) ? (byte >> 4) : (byte & 0x0F);
-            uint8_t base = PAL_BASE + idx + (idx << 1);   /* PAL_BASE + idx*3 */
-            px.g = i2c_reg[base];
-            px.r = i2c_reg[base + 1];
-            px.b = i2c_reg[base + 2];
+            if (idx == 0) {
+                /* Index 0 = blank/off, so an unpainted matrix reads as an empty
+                 * canvas that matches the editor's blank cells. */
+                px.g = 0; px.r = 0; px.b = 0;
+            } else {
+                uint8_t base = PAL_BASE + idx + (idx << 1);   /* PAL_BASE + idx*3 */
+                px.g = i2c_reg[base];
+                px.r = i2c_reg[base + 1];
+                px.b = i2c_reg[base + 2];
+            }
         } else {
             compute_led(&pat, i, n, &px);
         }
@@ -314,7 +323,7 @@ int main(void)
         if (tick_flag) {
             tick_flag = 0;
             if (REG_CTRL & CTRL_PAT_EN) {
-                if (pat_tick(&pat) && pat_is_animated(REG_PATTERN))
+                if (pat_tick(&pat, active_n_leds()) && pat_is_animated(REG_PATTERN))
                     dirty = 1;
             }
         }

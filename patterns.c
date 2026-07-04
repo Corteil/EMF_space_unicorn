@@ -37,7 +37,27 @@ static uint8_t  s_hue;         /* rainbow running hue (advances per LED) */
 static uint8_t  s_col;         /* matrix column accumulator */
 static uint8_t  s_row;         /* matrix row accumulator */
 static uint8_t  s_phase;       /* blink/alternate parity */
-static uint8_t  s_retro_gen;   /* retro-blink generation seed */
+
+/*
+ * Retro Blink and Twinkle need genuine per-LED memory to look randomly
+ * time-varying rather than a fixed function of index — a small, deliberate
+ * exception to the buffer-free design above.
+ *
+ * Retro Blink: one persistent on/off bit per LED (like an old blinkenlights
+ * panel), capped to BLINK_MAX_LEDS so it stays cheap; PARAM1 bits flip per
+ * frame advance. LEDs beyond the cap stay off.
+ *
+ * Twinkle: a small set of independently-timed "sparkle" slots, each holding
+ * a target LED index and a fade level; when a slot's fade reaches zero it is
+ * reseeded to a new random LED anywhere in the full strip.
+ */
+#define BLINK_MAX_LEDS   512
+#define BLINK_MAP_BYTES  (BLINK_MAX_LEDS / 8)
+#define MAX_SPARKLES     8
+
+static uint8_t  blink_map[BLINK_MAP_BYTES];
+static uint16_t sparkle_led[MAX_SPARKLES];
+static uint8_t  sparkle_fade[MAX_SPARKLES];   /* 0 = slot inactive/available */
 
 /* ------------------------------------------------------------------ */
 /* Utilities                                                            */
@@ -71,13 +91,15 @@ static void hue_to_rgb(uint8_t hue, uint8_t *g, uint8_t *r, uint8_t *b)
     }
 }
 
-/* Cheap 8-bit avalanche hash for deterministic per-LED pseudo-randomness. */
-static uint8_t hash8(uint8_t x)
+/* 16-bit Galois LFSR, taps 16/14/13/11 (mask 0xB400), period 65535. Seed must
+ * never be 0 — an all-zero state is a fixed point and never advances. */
+static uint16_t lfsr_tick(uint16_t v)
 {
-    x ^= (uint8_t)(x << 3);
-    x ^= (uint8_t)(x >> 5);
-    x ^= (uint8_t)(x << 1);
-    return x;
+    uint16_t lsb = v & 1;
+    v >>= 1;
+    if (lsb)
+        v ^= 0xB400;
+    return v;
 }
 
 /* ------------------------------------------------------------------ */
@@ -86,9 +108,16 @@ static uint8_t hash8(uint8_t x)
 
 void pat_init(struct pat_state *s)
 {
+    uint8_t i;
+
     s->pos  = 0;
     s->tick = 0;
     s->lfsr = 1;
+
+    for (i = 0; i < BLINK_MAP_BYTES; i++)
+        blink_map[i] = 0;
+    for (i = 0; i < MAX_SPARKLES; i++)
+        sparkle_fade[i] = 0;
 }
 
 uint8_t pat_is_animated(uint8_t pattern)
@@ -96,16 +125,47 @@ uint8_t pat_is_animated(uint8_t pattern)
     return (pattern != PAT_OFF && pattern != PAT_SOLID);
 }
 
-uint8_t pat_tick(struct pat_state *s)
+uint8_t pat_tick(struct pat_state *s, uint16_t n)
 {
     uint8_t speed = REG_SPEED ? REG_SPEED : 1;
 
-    if (++s->tick >= speed) {
-        s->tick = 0;
-        s->pos++;
-        return 1;
+    if (++s->tick < speed)
+        return 0;
+    s->tick = 0;
+    s->pos++;
+
+    if (n == 0)
+        n = 1;
+
+    if (REG_PATTERN == PAT_RETRO_BLINK) {
+        uint8_t count = REG_PARAM1 ? REG_PARAM1 : 1;
+        uint16_t limit = (n < BLINK_MAX_LEDS) ? n : BLINK_MAX_LEDS;
+        uint8_t c;
+        if (count > 8) count = 8;
+        for (c = 0; c < count; c++) {
+            uint16_t idx;
+            s->lfsr = lfsr_tick(s->lfsr);
+            idx = s->lfsr % limit;
+            blink_map[idx >> 3] ^= (uint8_t)(1 << (idx & 7));
+        }
+    } else if (REG_PATTERN == PAT_TWINKLE) {
+        uint8_t density = REG_PARAM1 ? REG_PARAM1 : 1;
+        uint8_t k;
+        if (density > MAX_SPARKLES) density = MAX_SPARKLES;
+        for (k = 0; k < MAX_SPARKLES; k++) {
+            if (k >= density) {
+                sparkle_fade[k] = 0;
+            } else if (sparkle_fade[k] == 0) {
+                s->lfsr = lfsr_tick(s->lfsr);
+                sparkle_led[k] = s->lfsr % n;
+                sparkle_fade[k] = 7;
+            } else {
+                sparkle_fade[k]--;
+            }
+        }
     }
-    return 0;
+
+    return 1;
 }
 
 void pat_prep(struct pat_state *s, uint16_t n)
@@ -136,11 +196,6 @@ void pat_prep(struct pat_state *s, uint16_t n)
         s_col = 0;
         s_row = 0;
         break;
-    case PAT_RETRO_BLINK: {
-        uint8_t flips = REG_PARAM1 ? REG_PARAM1 : 1;
-        s_retro_gen = (uint8_t)((uint8_t)s->pos * flips);
-        break;
-    }
     default:
         break;
     }
@@ -190,14 +245,19 @@ void compute_led(struct pat_state *s, uint16_t i, uint16_t n, struct cRGB *out)
     }
 
     case PAT_TWINKLE: {
-        /* fraction of LEDs (density) sparkle, each fading on its own phase */
-        uint8_t h = hash8((uint8_t)i);
-        uint8_t density = REG_PARAM1 ? REG_PARAM1 : 1;   /* 1-8 */
-        if ((h & 7) < density) {
-            uint8_t d = ((uint8_t)s->pos + h) & 7;       /* 0..7 fade ramp */
-            out->g = REG_GLB_G >> d;
-            out->r = REG_GLB_R >> d;
-            out->b = REG_GLB_B >> d;
+        /* Bright when this LED matches an active, freshly-seeded sparkle
+         * slot; fades as that slot's counter runs down (see pat_tick()). */
+        uint8_t k, shift = 8;
+        for (k = 0; k < MAX_SPARKLES; k++) {
+            if (sparkle_fade[k] && sparkle_led[k] == i) {
+                shift = (uint8_t)(7 - sparkle_fade[k]);
+                break;
+            }
+        }
+        if (shift < 8) {
+            out->g = REG_GLB_G >> shift;
+            out->r = REG_GLB_R >> shift;
+            out->b = REG_GLB_B >> shift;
         } else {
             out->g = 0; out->r = 0; out->b = 0;
         }
@@ -221,9 +281,12 @@ void compute_led(struct pat_state *s, uint16_t i, uint16_t n, struct cRGB *out)
     }
 
     case PAT_RETRO_BLINK: {
-        uint8_t h = hash8((uint8_t)((uint8_t)i ^ s_retro_gen));
-        if (h & 1) { out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B; }
-        else       { out->g = 0; out->r = 0; out->b = 0; }
+        /* Persistent per-LED bit, randomly toggled in pat_tick(); LEDs past
+         * BLINK_MAX_LEDS have no state and stay off. */
+        uint8_t on = (i < BLINK_MAX_LEDS) &&
+                     (blink_map[i >> 3] & (1 << (i & 7)));
+        if (on) { out->g = REG_GLB_G; out->r = REG_GLB_R; out->b = REG_GLB_B; }
+        else    { out->g = 0; out->r = 0; out->b = 0; }
         break;
     }
 

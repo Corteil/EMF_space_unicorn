@@ -1,6 +1,7 @@
 [submodule "i2c"]
 	path = i2c
-	url = https://github.com/usedbytes/usi_i2c_slave.git
+	url = https://github.com/Corteil/usi_i2c_slave.git
+	branch = space-unicorn-v2
 [submodule "ws2812"]
 	path = ws2812
 	url = https://github.com/usedbytes/light_ws2812.git
