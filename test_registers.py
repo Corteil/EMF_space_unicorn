@@ -121,31 +121,43 @@ def _init():
     else:
         _adapter = _LinuxAdapter()
 
-# ── Register addresses ────────────────────────────────────────────────────────
+# ── Register addresses (firmware v2 — buffer-free streaming) ─────────────────
 
-REG_CTRL     = 0x00
-REG_GLB_G    = 0x01
-REG_GLB_R    = 0x02
-REG_GLB_B    = 0x03
-REG_PATTERN  = 0x04
-REG_SPEED    = 0x05
-REG_N_LEDS   = 0x06
-REG_SEC_G    = 0x07
-REG_SEC_R    = 0x08
-REG_SEC_B    = 0x09
-REG_PARAM1   = 0x0A
-REG_PAL_SEL  = 0x0B
-REG_LED_BASE = 0x0C
+REG_CTRL       = 0x00
+REG_PATTERN    = 0x01
+REG_SPEED      = 0x02
+REG_FALLBACK   = 0x03
+REG_N_LEDS_LO  = 0x04
+REG_N_LEDS_HI  = 0x05
+REG_N_COLS     = 0x06
+REG_IDLE_TO    = 0x07
+REG_PARAM1     = 0x08
+REG_PARAM2     = 0x09
+REG_PAL_SEL    = 0x0A
+
+REG_GLB_G      = 0x10
+REG_GLB_R      = 0x11
+REG_GLB_B      = 0x12
+REG_SEC_G      = 0x13
+REG_SEC_R      = 0x14
+REG_SEC_B      = 0x15
+
+PAL_BASE       = 0x20   # 16 entries x (G,R,B), 0x20-0x4F
+PAL_ENTRIES    = 16
+IDX_BASE       = 0x50   # packed 4-bit indices, 2 LEDs/byte, 0x50-0xFF
+IDX_BYTES      = 176
 
 CTRL_RST     = 0x01
 CTRL_GLB     = 0x02
 CTRL_PAT_EN  = 0x04
+CTRL_IDX_EN  = 0x08
+CTRL_SAVE    = 0x10
 
 PATTERNS = {
     0: "OFF",         1: "SOLID",     2: "CHASE",
     3: "BLINK",       4: "ALTERNATE", 5: "WIPE",
     6: "TWINKLE",     7: "RAINBOW",   8: "RAINBOW_MTX",
-    9: "RETRO_BLINK",
+    9: "RETRO_BLINK", 10: "LARSON",
 }
 
 PALETTES = {
@@ -155,18 +167,22 @@ PALETTES = {
 }
 
 REG_NAMES = {
-    REG_CTRL: "CTRL", REG_GLB_G: "GLB_G", REG_GLB_R: "GLB_R",
-    REG_GLB_B: "GLB_B", REG_PATTERN: "PATTERN", REG_SPEED: "SPEED",
-    REG_N_LEDS: "N_LEDS", REG_SEC_G: "SEC_G", REG_SEC_R: "SEC_R",
-    REG_SEC_B: "SEC_B", REG_PARAM1: "PARAM1", REG_PAL_SEL: "PAL_SEL",
+    REG_CTRL: "CTRL", REG_PATTERN: "PATTERN", REG_SPEED: "SPEED",
+    REG_FALLBACK: "FALLBACK", REG_N_LEDS_LO: "N_LEDS_LO",
+    REG_N_LEDS_HI: "N_LEDS_HI", REG_N_COLS: "N_COLS",
+    REG_IDLE_TO: "IDLE_TO", REG_PARAM1: "PARAM1", REG_PARAM2: "PARAM2",
+    REG_PAL_SEL: "PAL_SEL", REG_GLB_G: "GLB_G", REG_GLB_R: "GLB_R",
+    REG_GLB_B: "GLB_B", REG_SEC_G: "SEC_G", REG_SEC_R: "SEC_R",
+    REG_SEC_B: "SEC_B",
 }
 
 # Expected values after do_reset() — init_color={0x00,0xFF,0x00} => pure red on WS2812
 RESET_DEFAULTS = {
-    REG_CTRL: 0x00, REG_GLB_G: 0x00, REG_GLB_R: 0xFF, REG_GLB_B: 0x00,
-    REG_PATTERN: 0x01, REG_SPEED: 0x0A, REG_N_LEDS: 0x40,
+    REG_CTRL: 0x00, REG_PATTERN: 0x01, REG_SPEED: 0x0A, REG_FALLBACK: 0x07,
+    REG_N_LEDS_LO: 0x40, REG_N_LEDS_HI: 0x00, REG_N_COLS: 0x08,
+    REG_IDLE_TO: 0x00, REG_PARAM1: 0x01, REG_PARAM2: 0x05, REG_PAL_SEL: 0x00,
+    REG_GLB_G: 0x00, REG_GLB_R: 0xFF, REG_GLB_B: 0x00,
     REG_SEC_G: 0x00, REG_SEC_R: 0x00, REG_SEC_B: 0x00,
-    REG_PARAM1: 0x01, REG_PAL_SEL: 0x00,
 }
 
 # Predefined palette colours from patterns.c PROGMEM: {GLB_G,GLB_R,GLB_B,SEC_G,SEC_R,SEC_B}
@@ -246,56 +262,73 @@ def test_reset():
 def test_rw_registers():
     print("\n--- Config Register Read/Write ---")
     cases = [
-        (REG_GLB_G,   0xAA, "GLB_G"),
-        (REG_GLB_R,   0xBB, "GLB_R"),
-        (REG_GLB_B,   0xCC, "GLB_B"),
-        (REG_PATTERN, 0x07, "PATTERN"),
-        (REG_SPEED,   0x20, "SPEED"),
-        (REG_N_LEDS,  0x10, "N_LEDS"),
-        (REG_SEC_G,   0x11, "SEC_G"),
-        (REG_SEC_R,   0x22, "SEC_R"),
-        (REG_SEC_B,   0x33, "SEC_B"),
-        (REG_PARAM1,  0x04, "PARAM1"),
-        (REG_PAL_SEL, 0x00, "PAL_SEL"),
+        (REG_GLB_G,     0xAA, "GLB_G"),
+        (REG_GLB_R,     0xBB, "GLB_R"),
+        (REG_GLB_B,     0xCC, "GLB_B"),
+        (REG_PATTERN,   0x07, "PATTERN"),
+        (REG_SPEED,     0x20, "SPEED"),
+        (REG_N_LEDS_LO, 0x10, "N_LEDS_LO"),
+        (REG_N_LEDS_HI, 0x00, "N_LEDS_HI"),
+        (REG_N_COLS,    0x08, "N_COLS"),
+        (REG_IDLE_TO,   0x00, "IDLE_TO"),
+        (REG_SEC_G,     0x11, "SEC_G"),
+        (REG_SEC_R,     0x22, "SEC_R"),
+        (REG_SEC_B,     0x33, "SEC_B"),
+        (REG_PARAM1,    0x04, "PARAM1"),
+        (REG_PARAM2,    0x05, "PARAM2"),
+        (REG_PAL_SEL,   0x00, "PAL_SEL"),
     ]
     for reg, val, name in cases:
         wr(reg, val)
         _check(name, rd(reg), val)
 
-def test_led_array():
-    print("\n--- LED Array Read/Write ---")
-    leds = [
-        (0xFF, 0x00, 0x00),  # LED 0 : green
-        (0x00, 0xFF, 0x00),  # LED 1 : red
-        (0x00, 0x00, 0xFF),  # LED 2 : blue
-    ]
-    for i, (g, r, b) in enumerate(leds):
-        wr_block(REG_LED_BASE + i * 3, [g, r, b])
-    for i, (g, r, b) in enumerate(leds):
-        d = rd_block(REG_LED_BASE + i * 3, 3)
-        _check("LED[{}] G".format(i), d[0], g)
-        _check("LED[{}] R".format(i), d[1], r)
-        _check("LED[{}] B".format(i), d[2], b)
+def test_user_palette():
+    print("\n--- User Palette Read/Write (0x20-0x4F) ---")
+    entries = [(0xFF, 0x00, 0x00), (0x00, 0xFF, 0x00), (0x00, 0x00, 0xFF)]
+    for i, (g, r, b) in enumerate(entries):
+        wr_block(PAL_BASE + i * 3, [g, r, b])
+    for i, (g, r, b) in enumerate(entries):
+        d = rd_block(PAL_BASE + i * 3, 3)
+        _check("PALETTE[{}] G".format(i), d[0], g)
+        _check("PALETTE[{}] R".format(i), d[1], r)
+        _check("PALETTE[{}] B".format(i), d[2], b)
 
-def test_led_block_write():
-    print("\n--- LED Block Write (multi-byte) ---")
+def test_palette_block_write():
+    print("\n--- Palette Block Write (multi-byte) ---")
     data = [
         0x10, 0x20, 0x30,
         0x40, 0x50, 0x60,
         0x70, 0x80, 0x90,
         0xA0, 0xB0, 0xC0,
     ]
-    wr_block(REG_LED_BASE, data)
-    back = rd_block(REG_LED_BASE, 12)
+    wr_block(PAL_BASE, data)
+    back = rd_block(PAL_BASE, 12)
     _check("Block write readback", back, data)
+
+def test_index_buffer():
+    print("\n--- Index Buffer Read/Write (0x50-0xFF, 4-bit packed) ---")
+    # LED 0 -> index 3 (low nibble), LED 1 -> index 9 (high nibble)
+    wr(IDX_BASE, (9 << 4) | 3)
+    _check("INDEX byte 0", rd(IDX_BASE), (9 << 4) | 3)
+    # Full-range block write/readback
+    data = [i & 0xFF for i in range(16)]
+    wr_block(IDX_BASE, data)
+    back = rd_block(IDX_BASE, len(data))
+    _check("Index block write readback", back, data)
 
 def test_ctrl_bits():
     print("\n--- CTRL Bit Fields ---")
-    for bit, name in [(CTRL_GLB, "GLB"), (CTRL_PAT_EN, "PAT_EN")]:
+    for bit, name in [(CTRL_GLB, "GLB"), (CTRL_PAT_EN, "PAT_EN"), (CTRL_IDX_EN, "IDX_EN")]:
         wr(REG_CTRL, bit)
         _check("{} set".format(name),   rd(REG_CTRL) & bit, bit)
         wr(REG_CTRL, 0x00)
         _check("{} clear".format(name), rd(REG_CTRL) & bit, 0x00)
+
+def test_save_autoclear():
+    print("\n--- CTRL_SAVE Auto-clear ---")
+    wr(REG_CTRL, CTRL_SAVE)
+    sleep_ms(20)   # allow the ATtiny85 main loop to process the write and EEPROM save
+    _check("SAVE auto-cleared", rd(REG_CTRL) & CTRL_SAVE, 0x00)
 
 def test_pattern_select():
     print("\n--- Pattern Register ---")
@@ -332,12 +365,14 @@ def test_all():
         return
     test_reset()
     test_rw_registers()
-    test_led_array()
-    test_led_block_write()
+    test_user_palette()
+    test_palette_block_write()
+    test_index_buffer()
     test_ctrl_bits()
     test_pattern_select()
     test_speed_boundary()
     test_palette_load()
+    test_save_autoclear()
     test_reset()   # leave device in a clean state
     print("\n" + "=" * 42)
     print(" PASSED: {}   FAILED: {}".format(_pass, _fail))
@@ -348,7 +383,7 @@ def test_all():
 def dump_registers():
     print("\n  Addr  Register     Value  Detail")
     print("  ----  -----------  -----  ------")
-    for reg in range(REG_PAL_SEL + 1):
+    for reg in list(range(REG_PAL_SEL + 1)) + list(range(REG_GLB_G, REG_SEC_B + 1)):
         name   = REG_NAMES.get(reg, "?")
         val    = rd(reg)
         detail = ""
@@ -357,16 +392,22 @@ def dump_registers():
             if val & CTRL_RST:    parts.append("RST")
             if val & CTRL_GLB:    parts.append("GLB")
             if val & CTRL_PAT_EN: parts.append("PAT_EN")
+            if val & CTRL_IDX_EN: parts.append("IDX_EN")
+            if val & CTRL_SAVE:   parts.append("SAVE")
             detail = " | ".join(parts) if parts else "-"
         elif reg == REG_PATTERN:
+            detail = PATTERNS.get(val, "?")
+        elif reg == REG_FALLBACK:
             detail = PATTERNS.get(val, "?")
         elif reg == REG_PAL_SEL:
             detail = PALETTES.get(val, "?")
         print("  0x{:02X}  {:<12} 0x{:02X}   {}".format(reg, name, val, detail))
-    print("\n  LEDs (first 4):")
+    n_leds = rd(REG_N_LEDS_LO) | (rd(REG_N_LEDS_HI) << 8)
+    print("\n  N_LEDS (16-bit) = {}".format(n_leds))
+    print("\n  User palette (first 4 entries):")
     for i in range(4):
-        d = rd_block(REG_LED_BASE + i * 3, 3)
-        print("    LED[{}]  G=0x{:02X}  R=0x{:02X}  B=0x{:02X}".format(
+        d = rd_block(PAL_BASE + i * 3, 3)
+        print("    PALETTE[{}]  G=0x{:02X}  R=0x{:02X}  B=0x{:02X}".format(
             i, d[0], d[1], d[2]))
 
 def _prompt_int(prompt, lo, hi):
@@ -408,15 +449,30 @@ def cmd_set_colour(label, g_reg, r_reg, b_reg):
         wr(g_reg, g); wr(r_reg, r); wr(b_reg, b)
         print("  {} = G:{} R:{} B:{}".format(label, g, r, b))
 
-def cmd_set_led():
-    i = _prompt_int("  LED index (0-63): ", 0, 63)
+def cmd_set_palette_entry():
+    i = _prompt_int("  Palette entry (0-15): ", 0, PAL_ENTRIES - 1)
     if i is None: return
     g = _prompt_int("  G (0-255): ", 0, 255)
     r = _prompt_int("  R (0-255): ", 0, 255)
     b = _prompt_int("  B (0-255): ", 0, 255)
     if None not in (g, r, b):
-        wr_block(REG_LED_BASE + i * 3, [g, r, b])
-        print("  LED[{}] = G:{} R:{} B:{}".format(i, g, r, b))
+        wr_block(PAL_BASE + i * 3, [g, r, b])
+        print("  PALETTE[{}] = G:{} R:{} B:{}".format(i, g, r, b))
+
+def cmd_set_index():
+    max_led = IDX_BYTES * 2 - 1
+    i = _prompt_int("  LED index (0-{}): ".format(max_led), 0, max_led)
+    if i is None: return
+    idx = _prompt_int("  Palette index (0=off, 1-15): ", 0, 15)
+    if idx is None: return
+    byte_addr = IDX_BASE + (i >> 1)
+    cur = rd(byte_addr)
+    if i & 1:
+        cur = (cur & 0x0F) | (idx << 4)
+    else:
+        cur = (cur & 0xF0) | idx
+    wr(byte_addr, cur)
+    print("  INDEX[{}] = {} (byte 0x{:02X} = 0x{:02X})".format(i, idx, byte_addr, cur))
 
 def cmd_set_speed():
     v = _prompt_int("  Speed (1=fastest, 255=slowest): ", 1, 255)
@@ -425,9 +481,11 @@ def cmd_set_speed():
         print("  Speed = {}".format(v))
 
 def cmd_set_nleds():
-    v = _prompt_int("  N_LEDS (1-64): ", 1, 64)
+    max_n = IDX_BYTES * 2
+    v = _prompt_int("  N_LEDS (1-{}): ".format(max_n), 1, max_n)
     if v is not None:
-        wr(REG_N_LEDS, v)
+        wr(REG_N_LEDS_LO, v & 0xFF)
+        wr(REG_N_LEDS_HI, (v >> 8) & 0xFF)
         print("  N_LEDS = {}".format(v))
 
 def cmd_set_param1():
@@ -435,6 +493,31 @@ def cmd_set_param1():
     if v is not None:
         wr(REG_PARAM1, v)
         print("  PARAM1 = {}".format(v))
+
+def cmd_set_param2():
+    v = _prompt_int("  PARAM2 (1-255): ", 1, 255)
+    if v is not None:
+        wr(REG_PARAM2, v)
+        print("  PARAM2 = {}".format(v))
+
+def cmd_set_fallback():
+    print("  Patterns:")
+    for k, v in PATTERNS.items():
+        print("    {:2d}  {}".format(k, v))
+    v = _prompt_int("  Fallback pattern ID: ", 0, 10)
+    if v is not None:
+        wr(REG_FALLBACK, v)
+        print("  FALLBACK set to {}".format(PATTERNS[v]))
+
+def cmd_set_idle_timeout():
+    v = _prompt_int("  Idle timeout, seconds (0=off): ", 0, 255)
+    if v is not None:
+        wr(REG_IDLE_TO, v)
+        print("  IDLE_TO = {}".format(v))
+
+def cmd_save():
+    wr(REG_CTRL, rd(REG_CTRL) | CTRL_SAVE)
+    print("  CTRL_SAVE written — configuration persisted to EEPROM.")
 
 def cmd_toggle_pat_en():
     ctrl = rd(REG_CTRL)
@@ -453,6 +536,15 @@ def cmd_toggle_glb():
     else:
         wr(REG_CTRL, ctrl | CTRL_GLB)
         print("  Global colour mode ON")
+
+def cmd_toggle_idx_en():
+    ctrl = rd(REG_CTRL)
+    if ctrl & CTRL_IDX_EN:
+        wr(REG_CTRL, ctrl & ~CTRL_IDX_EN)
+        print("  Index buffer mode OFF")
+    else:
+        wr(REG_CTRL, ctrl | CTRL_IDX_EN)
+        print("  Index buffer mode ON")
 
 def cmd_reset():
     device_reset()
@@ -474,12 +566,22 @@ MENU = """
    P  Set palette
    c  Set primary colour  (GLB G/R/B)
    C  Set secondary colour (SEC G/R/B)
-   l  Set individual LED
    v  Set speed
-   n  Set N_LEDS
+   n  Set N_LEDS (16-bit)
    a  Set PARAM1
+   b  Set PARAM2
    e  Toggle PAT_EN (pattern engine)
    g  Toggle GLB (global colour mode)
+
+ Index buffer / matrix mode
+   L  Set palette entry (0-15)
+   i  Set one LED's index (index buffer)
+   I  Toggle IDX_EN (index buffer mode)
+
+ Persistence
+   f  Set FALLBACK pattern
+   t  Set IDLE_TO (seconds)
+   S  Save current config to EEPROM (CTRL_SAVE)
 
  Device
    x  Reset device (CTRL_RST)
@@ -513,12 +615,18 @@ def main():
             elif cmd == 'P': cmd_set_palette()
             elif cmd == 'c': cmd_set_colour("Primary",   REG_GLB_G, REG_GLB_R, REG_GLB_B)
             elif cmd == 'C': cmd_set_colour("Secondary", REG_SEC_G, REG_SEC_R, REG_SEC_B)
-            elif cmd == 'l': cmd_set_led()
             elif cmd == 'v': cmd_set_speed()
             elif cmd == 'n': cmd_set_nleds()
             elif cmd == 'a': cmd_set_param1()
+            elif cmd == 'b': cmd_set_param2()
             elif cmd == 'e': cmd_toggle_pat_en()
             elif cmd == 'g': cmd_toggle_glb()
+            elif cmd == 'L': cmd_set_palette_entry()
+            elif cmd == 'i': cmd_set_index()
+            elif cmd == 'I': cmd_toggle_idx_en()
+            elif cmd == 'f': cmd_set_fallback()
+            elif cmd == 't': cmd_set_idle_timeout()
+            elif cmd == 'S': cmd_save()
             elif cmd == 'x': cmd_reset()
             else: print("  Unknown command '{}'. Type q to quit.".format(cmd))
         except OSError as exc:

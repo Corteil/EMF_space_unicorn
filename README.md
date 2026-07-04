@@ -2,8 +2,9 @@
 
 A WS2812 NeoPixel hexpansion for the EMF Tildagon badge. An ATtiny85 setup as an I²C client
 drives the LEDs with animated patterns, predefined colour palettes and a user
-button for live pattern cycling. This repository holds the firmware and the
-KiCad hardware design.
+button for live pattern cycling. Settings can be saved to the ATtiny85's
+internal EEPROM so the badge lights up on its own, without the control app.
+This repository holds the firmware and the KiCad hardware design.
 
 | Front | Rear |
 |:-----:|:----:|
@@ -112,14 +113,16 @@ A pre-built `main.hex` is included in the repository if you only need to flash.
 
 | Section | Used    | Available |
 |---------|---------|-----------|
-| Flash   | 2890 B  | 8192 B    |
-| RAM     | 225 B   | 512 B     |
+| Flash   | 3418 B  | 8192 B    |
+| RAM     | 390 B   | 512 B     |
 
 ---
 
 ## I2C Protocol
 
 **Slave address: 0x40** (hardcoded in `i2c/i2c_slave_defs.h`)
+
+The full 8-bit register space (0x00–0xFF) is addressable.
 
 Write transaction:
 
@@ -132,31 +135,40 @@ Read transaction:
 The register address auto-increments after each byte, so multi-byte reads and
 writes are supported in a single transaction.
 
-**LED values are updated only after a STOP condition is received.**
+**LED values are updated only after a STOP condition is received.** There is
+no per-LED frame buffer — each pixel is computed on the fly as the WS2812
+stream is clocked out, so LED count is limited by power and frame rate, not
+by RAM.
 
 ---
 
 ## Register Map
 
-| Address    | Name        | Description                              | Reset |
-|------------|-------------|------------------------------------------|-------|
-| 0x00       | **CTRL**    | Control register                         | 0x00  |
-| 0x01       | **GLB_G**   | Primary colour — green                   | 0x00  |
-| 0x02       | **GLB_R**   | Primary colour — red                     | 0xFF  |
-| 0x03       | **GLB_B**   | Primary colour — blue                    | 0x00  |
-| 0x04       | **PATTERN** | Pattern ID (0–9, see table below)        | 0x01  |
-| 0x05       | **SPEED**   | Ticks per animation frame (1=fast, 255=slow) | 0x0A |
-| 0x06       | **N_LEDS**  | Active LED count (max 64)                | 0x40  |
-| 0x07       | **SEC_G**   | Secondary colour — green                 | 0x00  |
-| 0x08       | **SEC_R**   | Secondary colour — red                   | 0x00  |
-| 0x09       | **SEC_B**   | Secondary colour — blue                  | 0x00  |
-| 0x0A       | **PARAM1**  | Pattern-specific parameter               | 0x01  |
-| 0x0B       | **PAL_SEL** | Palette selector (0=user, 1–7=predefined)| 0x00  |
-| 0x0C       | **GREEN[0]**| LED 0 green                              | 0x00  |
-| 0x0D       | **RED[0]**  | LED 0 red                                | 0x00  |
-| 0x0E       | **BLUE[0]** | LED 0 blue                               | 0x00  |
-| …          | …           | 3 bytes per LED (G, R, B)                | 0x00  |
-| 0x0C+n×3   | **GREEN[n]**| LED n green                              | 0x00  |
+| Address     | Name           | Description                                    | Reset |
+|-------------|----------------|-------------------------------------------------|-------|
+| 0x00        | **CTRL**       | Control register                                | 0x00  |
+| 0x01        | **PATTERN**    | Pattern ID (0–10, see table below)              | 0x01  |
+| 0x02        | **SPEED**      | Ticks per animation frame (1=fast, 255=slow)    | 0x0A  |
+| 0x03        | **FALLBACK**   | Pattern ID run on boot / after an idle timeout  | 0x07  |
+| 0x04        | **N_LEDS_LO**  | Active LED count, low byte                      | 0x40  |
+| 0x05        | **N_LEDS_HI**  | Active LED count, high byte                     | 0x00  |
+| 0x06        | **N_COLS**     | Matrix columns for RAINBOW_MTX (0 ⇒ 8)          | 0x08  |
+| 0x07        | **IDLE_TO**    | Inactivity timeout in seconds before reverting to FALLBACK (0=off) | 0x00 |
+| 0x08        | **PARAM1**     | Pattern-specific parameter                      | 0x01  |
+| 0x09        | **PARAM2**     | Pattern-specific parameter                      | 0x05  |
+| 0x0A        | **PAL_SEL**    | Palette selector (0=user, 1–7=predefined)       | 0x00  |
+| 0x10        | **GLB_G**      | Primary colour — green                          | 0x00  |
+| 0x11        | **GLB_R**      | Primary colour — red                            | 0xFF  |
+| 0x12        | **GLB_B**      | Primary colour — blue                           | 0x00  |
+| 0x13        | **SEC_G**      | Secondary colour — green                        | 0x00  |
+| 0x14        | **SEC_R**      | Secondary colour — red                          | 0x00  |
+| 0x15        | **SEC_B**      | Secondary colour — blue                         | 0x00  |
+| 0x20–0x4F   | **PALETTE[0–15]** | 16-entry user colour palette, 3 bytes (G,R,B) each | 0x00 |
+| 0x50–0xFF   | **INDEX[0–351]**  | Packed 4-bit palette-index buffer for matrix mode (see below) | 0x00 |
+
+`N_LEDS_LO`/`N_LEDS_HI` form a 16-bit active LED count (little-endian); a
+value of 0 is treated as 64. `PATTERN`, `SPEED`, `PARAM1`/`PARAM2` and colours
+are unchanged in meaning from earlier firmware, but have moved address.
 
 > WS2812 byte order on the wire is **G, R, B**.
 
@@ -166,34 +178,37 @@ writes are supported in a single transaction.
 
 | Bit | Name       | Description |
 |-----|------------|-------------|
-| 0   | **RST**    | Write 1 to reset all LEDs and registers to defaults. Auto-clears. |
+| 0   | **RST**    | Write 1 to reset all registers to defaults. Auto-clears. |
 | 1   | **GLB**    | Write 1 to display the primary colour (GLB_G/R/B) on all LEDs. |
 | 2   | **PAT_EN** | Write 1 to enable the pattern animation engine. |
-| 7–3 | —          | Reserved, read as 0. |
+| 3   | **IDX_EN** | Write 1 to stream LED colours from the packed index buffer (0x50–0xFF) instead of a pattern. |
+| 4   | **SAVE**   | Write 1 to persist the current configuration to EEPROM. Auto-clears once saved. |
+| 7–5 | —          | Reserved, read as 0. |
 
 ---
 
-## Patterns (REG_PATTERN, 0x04)
+## Patterns (REG_PATTERN, 0x01)
 
-| ID | Name            | Description                                                   | Uses PARAM1 |
-|----|-----------------|---------------------------------------------------------------|-------------|
+| ID | Name            | Description                                                   | Uses |
+|----|-----------------|---------------------------------------------------------------|------|
 | 0  | OFF             | All LEDs off                                                  | —           |
 | 1  | SOLID           | All LEDs show primary colour                                  | —           |
-| 2  | CHASE           | Scrolling comet; tail dims by ½ each step                    | —           |
+| 2  | CHASE           | Scrolling comet; tail dims by right-shift, capped at 1/128    | PARAM1 = tail length |
 | 3  | BLINK           | All LEDs toggle between primary and off                       | —           |
 | 4  | ALTERNATE       | Even LEDs = primary, odd = secondary; swaps each frame        | —           |
 | 5  | WIPE            | Fill left→right one LED per frame, then clear                 | —           |
-| 6  | TWINKLE         | Random LEDs flash; others fade by ½ each frame               | —           |
-| 7  | RAINBOW         | Full hue wheel cycling across the strip                       | —           |
-| 8  | RAINBOW_MTX     | Diagonal rainbow on 8×8 grid, rotates over time              | bit 0 = serpentine wiring |
-| 9  | RETRO_BLINK     | Random LEDs toggle independently (50s computer effect)        | LEDs toggled per frame (1–8) |
+| 6  | TWINKLE         | Independently-timed sparkles fade in/out at random LEDs       | PARAM1 = number of simultaneous sparkles (max 8) |
+| 7  | RAINBOW         | Full hue wheel cycling across the strip                       | PARAM2 = hue step per LED |
+| 8  | RAINBOW_MTX     | Diagonal rainbow on an N_COLS-wide grid, rotates over time     | PARAM1 bit 0 = serpentine wiring |
+| 9  | RETRO_BLINK     | Random LEDs toggle independently (50s computer effect); state kept for the first 512 LEDs only | PARAM1 = LEDs toggled per frame (max 8) |
+| 10 | LARSON          | Cylon/KITT scanner; bright eye bounces end-to-end, tail dims same as CHASE | PARAM1 = tail length |
 
 Enable a pattern by writing PAT_EN to CTRL and the ID to PATTERN. The user
-button (PB4) also cycles through patterns 1–9 with a single press.
+button (PB4) also cycles through patterns 1–10 with a single press.
 
 ---
 
-## Predefined Palettes (REG_PAL_SEL, 0x0B)
+## Predefined Palettes (REG_PAL_SEL, 0x0A)
 
 Writing a palette ID loads predefined primary and secondary colours from flash
 (PROGMEM) into GLB and SEC registers. Writing 0 keeps the current user colours.
@@ -211,22 +226,44 @@ Writing a palette ID loads predefined primary and secondary colours from flash
 
 ---
 
+## User Palette and Index Buffer (matrix mode)
+
+Setting `CTRL_IDX_EN` switches LED output from the pattern engine to a
+directly-addressable canvas, driven by two blocks:
+
+- **`PALETTE[0–15]`** (0x20–0x4F) — 16 user-defined colours, 3 bytes (G, R, B)
+  each. On reset, entries 0 and 1 are set to the primary/secondary colours;
+  all 16 entries can be freely overwritten over I2C.
+- **`INDEX[0–351]`** (0x50–0xFF) — one 4-bit palette index per LED, two LEDs
+  packed per byte (LED *n*'s index is the low nibble of byte `n/2` if *n* is
+  even, the high nibble if odd). Index **0 always renders as off/blank**,
+  regardless of palette contents; indices 1–15 select `PALETTE[1]`…`PALETTE[15]`.
+
+Index mode is bounded by the size of the index buffer: 176 bytes × 2 LEDs per
+byte = **352 LEDs maximum**, irrespective of `N_LEDS`.
+
+---
+
+## Persistence, Fallback and Idle Timeout
+
+- **Save**: writing `CTRL_SAVE` copies the control/colour registers and the
+  16-entry user palette into the ATtiny85's internal EEPROM. The bit
+  auto-clears once the save completes.
+- **Boot**: on power-up, a valid saved configuration is reloaded; otherwise
+  firmware defaults are used. The badge then runs the `FALLBACK` pattern
+  immediately, so it lights up without the control app.
+- **Idle timeout**: if `IDLE_TO` is non-zero and no I2C write is seen for that
+  many seconds, the firmware reverts to the `FALLBACK` pattern.
+
+---
+
 ## Heartbeat LED (PB1)
 
 The LED on PB1 serves two purposes:
 
-- **Heartbeat**: 1 Hz blink while the firmware is running, driven by Timer0 ISR.
-- **Data activity**: overrides the heartbeat with a ~200 ms solid-on flash each
+- **Heartbeat**: slow blink while the firmware is running, driven by Timer0 ISR.
+- **Data activity**: overrides the heartbeat with a brief solid-on flash each
   time an I2C STOP condition is received.
-
----
-
-## Maximum LED Count
-
-With the extended register map (12 global registers) and the pattern engine's
-8-byte `blink_map` for RETRO_BLINK, the practical RAM limit is approximately
-**125–130 LEDs**. The compile-time default is **64** to support an 8×8 matrix.
-To change it, edit `N_LEDS` in `i2c/i2c_slave_defs.h`.
 
 ---
 
