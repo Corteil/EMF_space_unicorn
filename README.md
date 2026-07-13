@@ -94,7 +94,8 @@ AVRDUDE_PROGRAMMER = usbasp     # or linuxspi, avrisp2, usbtiny, ...
 AVRDUDE_PORT       = usb
 ```
 
-A pre-built `main.hex` is included in the repository if you only need to flash.
+Build artifacts (`main.hex`, `main.elf`) are not tracked in the repository —
+always build from source so the hex matches the current code.
 
 ### Fuses — required on every fresh chip
 
@@ -113,7 +114,7 @@ A pre-built `main.hex` is included in the repository if you only need to flash.
 
 | Section | Used    | Available |
 |---------|---------|-----------|
-| Flash   | 3418 B  | 8192 B    |
+| Flash   | 3708 B  | 8192 B    |
 | RAM     | 390 B   | 512 B     |
 
 ---
